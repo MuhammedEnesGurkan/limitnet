@@ -86,7 +86,8 @@ static class Platform
 
 sealed class WindowsCapture : ICapture
 {
-    readonly TraceEventSession kernel, dns;
+    TraceEventSession kernel, dns;
+    volatile bool disposed;
     readonly object gate = new();
     readonly Dictionary<ConnKey, Acc> conns = [];
     // ponytail: sınırsız IP→alan adı tablosu; uzun oturumlarda şişerse yaşa göre temizle
@@ -102,29 +103,10 @@ sealed class WindowsCapture : ICapture
 
     public WindowsCapture()
     {
-        // Kaynak İzleyicisi'nin kullandığı çekirdek TCP/IP olayları: süreç, adresler, portlar, bayt
-        kernel = new TraceEventSession(KernelTraceEventParser.KernelSessionName) { StopOnDispose = true };
-        kernel.EnableKernelProvider(KernelTraceEventParser.Keywords.NetworkTCPIP);
-        var k = kernel.Source.Kernel;
-        k.TcpIpSend += e => Add("TCP", e.ProcessID, e.saddr, e.sport, e.daddr, e.dport, e.size, false);
-        k.TcpIpRecv += e => Add("TCP", e.ProcessID, e.saddr, e.sport, e.daddr, e.dport, e.size, true);
-        k.TcpIpSendIPV6 += e => Add("TCP", e.ProcessID, e.saddr, e.sport, e.daddr, e.dport, e.size, false);
-        k.TcpIpRecvIPV6 += e => Add("TCP", e.ProcessID, e.saddr, e.sport, e.daddr, e.dport, e.size, true);
-        k.UdpIpSend += e => Add("UDP", e.ProcessID, e.saddr, e.sport, e.daddr, e.dport, e.size, false);
-        k.UdpIpRecv += e => Add("UDP", e.ProcessID, e.saddr, e.sport, e.daddr, e.dport, e.size, true);
-        k.UdpIpSendIPV6 += e => Add("UDP", e.ProcessID, e.saddr, e.sport, e.daddr, e.dport, e.size, false);
-        k.UdpIpRecvIPV6 += e => Add("UDP", e.ProcessID, e.saddr, e.sport, e.daddr, e.dport, e.size, true);
-        new Thread(() => kernel.Source.Process()) { IsBackground = true, Name = "etw-net" }.Start();
-
-        // alan adları: Windows DNS istemcisinin "sorgu tamamlandı" olayı (DoH açıkken de çalışır)
-        dns = new TraceEventSession("Akis-DNS") { StopOnDispose = true };
-        dns.EnableProvider("Microsoft-Windows-DNS-Client");
-        new RegisteredTraceEventParser(dns.Source).All += e =>
-        {
-            if ((int)e.ID != 3008 || e.PayloadByName("QueryName") is not string name || e.PayloadByName("QueryResults") is not string results) return;
-            foreach (var ip in DnsResultIps(results)) hosts[ip] = name;
-        };
-        new Thread(() => dns.Source.Process()) { IsBackground = true, Name = "etw-dns" }.Start();
+        kernel = Kernel();
+        Pump("etw-net", () => kernel, () => kernel = Kernel());
+        dns = Dns();
+        Pump("etw-dns", () => dns, () => dns = Dns());
 
         // açılıştan önce çözülmüş adlar için DNS önbelleğini bir kez oku
         Task.Run(() =>
@@ -136,6 +118,51 @@ sealed class WindowsCapture : ICapture
             }
             catch (InvalidOperationException) { } // önbellek okunamazsa adlar sonraki sorgularla gelir
         });
+    }
+
+    // Aynı adlı ETW oturumunu başka bir araç (ör. --probe) devralırsa Process() döner: oturumu yeniden kur.
+    // ponytail: sonsuza dek 2 sn'de bir dener; iki araç oturumu sürekli kaparsa sayımda boşluklar olur
+    void Pump(string name, Func<TraceEventSession> current, Action recreate) => new Thread(() =>
+    {
+        while (!disposed)
+        {
+            try { current().Source.Process(); }
+            catch (Exception) { } // kapanmış oturum: aşağıda yeniden kurulur
+            if (disposed) return;
+            Thread.Sleep(2000);
+            try { recreate(); }
+            catch (Exception) { }
+        }
+    }) { IsBackground = true, Name = name }.Start();
+
+    TraceEventSession Kernel()
+    {
+        // Kaynak İzleyicisi'nin kullandığı çekirdek TCP/IP olayları: süreç, adresler, portlar, bayt
+        var s = new TraceEventSession(KernelTraceEventParser.KernelSessionName) { StopOnDispose = true };
+        s.EnableKernelProvider(KernelTraceEventParser.Keywords.NetworkTCPIP);
+        var k = s.Source.Kernel;
+        k.TcpIpSend += e => Add("TCP", e.ProcessID, e.saddr, e.sport, e.daddr, e.dport, e.size, false);
+        k.TcpIpRecv += e => Add("TCP", e.ProcessID, e.saddr, e.sport, e.daddr, e.dport, e.size, true);
+        k.TcpIpSendIPV6 += e => Add("TCP", e.ProcessID, e.saddr, e.sport, e.daddr, e.dport, e.size, false);
+        k.TcpIpRecvIPV6 += e => Add("TCP", e.ProcessID, e.saddr, e.sport, e.daddr, e.dport, e.size, true);
+        k.UdpIpSend += e => Add("UDP", e.ProcessID, e.saddr, e.sport, e.daddr, e.dport, e.size, false);
+        k.UdpIpRecv += e => Add("UDP", e.ProcessID, e.saddr, e.sport, e.daddr, e.dport, e.size, true);
+        k.UdpIpSendIPV6 += e => Add("UDP", e.ProcessID, e.saddr, e.sport, e.daddr, e.dport, e.size, false);
+        k.UdpIpRecvIPV6 += e => Add("UDP", e.ProcessID, e.saddr, e.sport, e.daddr, e.dport, e.size, true);
+        return s;
+    }
+
+    TraceEventSession Dns()
+    {
+        // alan adları: Windows DNS istemcisinin "sorgu tamamlandı" olayı (DoH açıkken de çalışır)
+        var s = new TraceEventSession("Akis-DNS") { StopOnDispose = true };
+        s.EnableProvider("Microsoft-Windows-DNS-Client");
+        new RegisteredTraceEventParser(s.Source).All += e =>
+        {
+            if ((int)e.ID != 3008 || e.PayloadByName("QueryName") is not string name || e.PayloadByName("QueryResults") is not string results) return;
+            foreach (var ip in DnsResultIps(results)) hosts[ip] = name;
+        };
+        return s;
     }
 
     // "type: 5 x.l.google.com;::ffff:142.250.1.1;2a00:1450::e;" → IP'ler
@@ -208,7 +235,9 @@ sealed class WindowsCapture : ICapture
             .Select(u => u.Address)
             .ToHashSet();
 
-    public void Apply(IReadOnlyDictionary<string, Rule> rules)
+    public void Apply(IReadOnlyDictionary<string, Rule> rules) => ApplyRules(rules);
+
+    public static void ApplyRules(IReadOnlyDictionary<string, Rule> rules)
     {
         // her seferinde sıfırdan kur: bizim grubumuzdaki kural/politikaları sil, güncel listeyi yaz
         var sb = new StringBuilder("""
@@ -246,6 +275,7 @@ sealed class WindowsCapture : ICapture
 
     public void Dispose()
     {
+        disposed = true;
         kernel.Dispose();
         dns.Dispose();
     }

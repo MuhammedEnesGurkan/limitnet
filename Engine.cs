@@ -52,6 +52,7 @@ sealed class Engine : IDisposable
     readonly Dictionary<string, Rule> rules;
     readonly Dictionary<string, AppInfo> apps = [];
     readonly Dictionary<ConnKey, long[]> connTotals = [];
+    readonly Dictionary<string, string> iconCache = [];
     long lastTick = Stopwatch.GetTimestamp();
     DateTime lastSave = DateTime.UtcNow;
     static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
@@ -120,7 +121,7 @@ sealed class Engine : IDisposable
             foreach (var a in apps.Values.Where(a => !a.IconSent))
             {
                 a.IconSent = true;
-                if (Platform.Icon(a.Id) is { } icon) icons[a.Id] = icon;
+                if (Platform.Icon(a.Id) is { } icon) icons[a.Id] = iconCache[a.Id] = icon;
             }
 
             return JsonSerializer.Serialize(new
@@ -141,6 +142,11 @@ sealed class Engine : IDisposable
                 }),
             }, Json);
         }
+    }
+
+    public string IconsJson()
+    {
+        lock (gate) return JsonSerializer.Serialize(new { type = "icons", icons = iconCache }, Json);
     }
 
     public string? Handle(string msg, Action<string> send)

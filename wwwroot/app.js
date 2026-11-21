@@ -380,8 +380,28 @@ document.querySelectorAll('.thead [data-sort]').forEach(b => b.addEventListener(
 
 $('#q').addEventListener('input', e => { query = e.target.value.trim(); renderLive(); });
 
+function onService(m) {
+  const box = $('#service'), btn = $('#install');
+  box.hidden = m.state === 'connected';
+  if (box.hidden) return;
+  const canInstall = m.state === 'missing' && m.canInstall;
+  btn.hidden = !canInstall;
+  btn.textContent = m.installed ? 'Servisi başlat' : 'Servisi kur';
+  $('#service-text').textContent = {
+    missing: !m.canInstall ? 'Arka plan servisi çalışmıyor. Başlatmak için terminalde: sudo akis --service'
+      : m.installed ? 'Arka plan servisi durmuş. Trafik şu an sayılmıyor.'
+      : 'Arka plan servisi kurulu değil. Trafiğin pencere kapalıyken de sayılması için bir kez kurulması gerekiyor; kurulum yönetici izni ister.',
+    starting: 'Servise bağlanılıyor…',
+    lost: 'Servis bağlantısı koptu, yeniden bağlanılıyor…',
+    installing: 'Servis kuruluyor, Windows izin isteyecek…',
+  }[m.state] ?? m.state;
+}
+$('#install').addEventListener('click', () => bridge.send({ type: 'install' }));
+
 bridge.on(m => {
   if (m.type === 'tick') onTick(m);
+  else if (m.type === 'icons') Object.assign(icons, m.icons);
+  else if (m.type === 'service') onService(m);
   else if (m.type === 'history') renderHistory(m.data);
   else if (m.type === 'toast') toast(m.text, m.ok);
 });

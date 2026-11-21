@@ -64,6 +64,13 @@ button { cursor: pointer; }
   background: color-mix(in srgb, var(--danger) 12%, transparent);
 }
 
+.notice {
+  display: flex; align-items: center; gap: 16px; justify-content: space-between;
+  margin: 12px 24px 0; padding: 10px 10px 10px 14px; border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--down) 40%, transparent);
+  background: color-mix(in srgb, var(--down) 8%, transparent);
+}
+
 main { flex: 1; overflow: auto; padding: 0 24px 24px; }
 
 /* akış nehri: yükleme eksenin üstünde, indirme altında */
